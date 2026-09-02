@@ -1,0 +1,46 @@
+# [ARCHIVE] Legacy Docker deployment (image.tar based), KEPT FOR REFERENCE ONLY.
+# This repo now runs natively on Windows (start.bat) WITHOUT Docker.
+# image.tar / voices / output / cache / code/frontend.py are NOT shipped here,
+# so `docker compose up -d` cannot work out of the box anymore.
+# CosyVoice 声音克隆 — 独立部署（已从 shengyinkelongshuzirendamoxing 主仓库拆出）
+# 使用：双击 启动.bat 或 docker compose up -d
+
+services:
+  cosyvoice:
+    image: cosyvoice-platform-full
+    container_name: cosyvoice
+    ports:
+      - "8188:8188"
+    volumes:
+      # API 代码 — 修改后重启容器即可生效
+      - ./code/app.py:/app/app.py:ro
+      - ./code/model.py:/app/model.py:ro
+      - ./code/frontend.py:/app/cosyvoice/cli/frontend.py:ro
+      # 音色库 + 输出
+      - ./voices:/data/voices
+      - ./output:/data/output
+      # 缓存 (ModelScope wetext + Triton autotune，避免每次下载/编译)
+      - ./cache:/root/.cache
+      - ./cache/triton:/root/.triton
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+      - MODELSCOPE_CACHE=/root/.cache/modelscope
+      - MODELSCOPE_DOWNLOAD_PARALLELS=1
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: "no"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"

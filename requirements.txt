@@ -1,0 +1,59 @@
+# ============================================================
+# CosyVoice 声音克隆 — Windows 原生运行依赖（Python 3.10-3.13）
+# 安装：venv\Scripts\pip install -r requirements.txt
+# torch/torchaudio 使用 CUDA 12.8 构建（cu128），需 NVIDIA 驱动 >= 570
+# 注意：
+#   - 必须使用 Python 3.10-3.13（kaldifst/wetext 没有 3.14 的 Windows 轮子）
+#   - openai-whisper 源码构建时需要 pkg_resources，用 --no-build-isolation 安装
+# ============================================================
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+# ---------- 推理核心 ----------
+torch==2.11.0+cu128
+torchaudio==2.11.0+cu128
+transformers==4.51.3
+modelscope==1.20.0
+onnxruntime-gpu==1.23.2
+
+# Fun-ASR-Nano 语音识别（与镜像内版本一致）
+funasr==1.2.9
+
+# ---------- CosyVoice3 前端/文本处理 ----------
+# openai-whisper==20231117 在 启动.bat 中单独安装（--no-build-isolation，构建需要 pkg_resources）
+# openai-whisper 依赖中已含 tiktoken（本机实测 0.12.0），无需在此重复锁定；
+# 若需显式固定版本，可自行 pip 安装指定版本号。
+sentencepiece==0.2.1
+inflect==7.3.1
+wetext==0.0.4
+jieba==0.42.1
+regex==2025.11.3
+einops==0.8.1
+x-transformers==2.11.24
+hyperpyyaml==1.2.2
+omegaconf==2.3.0
+ruamel.yaml==0.18.16
+librosa==0.10.2
+soundfile==0.12.1
+numpy==1.26.4
+scipy==1.15.3
+
+# ---------- CosyVoice3 运行时还需要（镜像内同款版本） ----------
+conformer==0.3.2
+diffusers==0.29.0
+lightning==2.2.4
+rich==13.7.1
+wget==3.2
+gdown==5.1.0
+onnx==1.16.0
+protobuf==4.25
+pyarrow==18.1.0
+pyworld==0.3.4
+matplotlib==3.7.5
+tensorboard==2.14.0
+
+# ---------- Web 服务 ----------
+fastapi==0.115.6
+uvicorn
+python-multipart
+pydantic

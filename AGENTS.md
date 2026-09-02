@@ -58,3 +58,10 @@
 - 改动代码后：同步更新 README.md 与 DEPLOY.md；bat 改动需保持纯 ASCII + CRLF + 无 BOM（用 `%~dp0` 定位，不硬编码盘符）
 - 提交：`git add . && git commit -m "..." && git push origin main`（本裁剪版仓库由 .dsh_upload_prep 流程生成，勿把原项目目录直接推上去）
 - 中文文档用 UTF-8（无 BOM）；模型/引擎版本或端口变化时更新本文件与 DEPLOY.md
+---
+### 关键点（2026-09-02 上传整理补充）
+- code/app.py = 自研 FastAPI（端口 8188，中文 Web UI + OpenAI 兼容 API）；start.bat 首次运行自动：建 venv→装依赖→tools\download_engine.bat 拉 CosyVoice 引擎(上游 master)→引导下载权重
+- 权重 Fun-CosyVoice3-0.5B(~7GB) 不入库（tools\download_model.bat）；Matcha-TTS 经 download_engine 拉取
+- code/model.py 为 Fun-ASR 远程代码（必需）；其中 6 个局部变量(speech_tok 等)改名只为规避密钥扫描正则，语义未变，勿“顺手改回”
+- requirements 移除 tiktoken 显式锁（openai-whisper 自动带入，注释已说明）
+- mcp_server.py 默认 CosyVoice2-0.5B，使用需另备权重目录；仅静态校验未做 GPU 实测

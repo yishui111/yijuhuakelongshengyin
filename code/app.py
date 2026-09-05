@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 import torch
 import torchaudio
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -101,6 +101,27 @@ def ensure_wav(src: str, dst: str, sample_rate: int = 24000) -> None:
         sf.write(dst, waveform.squeeze(0).numpy(), sample_rate, subtype='PCM_16')
     except Exception as e:
         raise HTTPException(400, f"音频解码失败（需 wav/mp3/m4a/webm 等格式，请确认文件未损坏）: {e}")
+
+
+# 引擎 frontend._extract_speech_token 硬限制：参考音频超 30 秒直接 assert 崩溃。
+# 崩溃发生在流式响应已开始之后（浏览器表现为 ERR_INCOMPLETE_CHUNKED_ENCODING），
+# 无法转成 HTTP 错误码，必须在音频进入引擎前于各入口拦截。
+PROMPT_MAX_SECONDS = 30.0
+
+def check_prompt_duration(path: str, max_seconds: float = PROMPT_MAX_SECONDS) -> None:
+    """校验参考音频时长不超过引擎上限，超限抛 HTTPException(400)"""
+    try:
+        import soundfile as sf
+        info = sf.info(path)
+        duration = info.frames / float(info.samplerate)
+    except Exception as e:
+        raise HTTPException(400, f"无法读取参考音频信息: {e}")
+    if duration > max_seconds:
+        raise HTTPException(
+            400,
+            f"参考音频时长 {duration:.1f} 秒，超过引擎上限 {max_seconds:.0f} 秒，"
+            f"请截取 {max_seconds:.0f} 秒以内的片段后重试（推荐 3-30 秒）"
+        )
 
 
 # ---------- 复述参考文本检测与重试 ----------
@@ -538,6 +559,10 @@ def _process_batch(task_id: str, sentences: list, mode: str, voice_id: str,
                 except Exception:
                     full_prompt_text = ""
 
+        if prompt_audio:
+            # 参考音频超 30s 会让引擎 assert 崩溃，逐句合成前整体拦截
+            check_prompt_duration(prompt_audio)
+
         for idx, sentence in enumerate(sentences):
             st = task["sentences"][idx]
             st["status"] = "processing"
@@ -657,6 +682,8 @@ async def openai_speech(request: SpeechRequest):
     if custom_voice:
         # 使用自定义音色
         prompt_audio = custom_voice["audio_path"]
+        # 存量音色可能超 30s（引擎 assert 崩溃点），进入推理前拦截
+        check_prompt_duration(prompt_audio)
         prompt_text = request.prompt_text or custom_voice.get("text", "") or ""
         if prompt_text.strip():
             # 完整参考文本保留用于音色克隆（不截断，避免破坏特征提取）
@@ -852,6 +879,7 @@ async def create_voice(
     
     try:
         ensure_wav(str(raw_path), str(temp_path))
+        check_prompt_duration(str(temp_path))
         wav_bytes = temp_path.read_bytes()
         # 如果没有提供文本，使用 Fun-ASR 转写
         if not text:
@@ -1041,6 +1069,7 @@ async def tts(
         temp_path = INPUT_DIR / f"prompt_{uuid.uuid4().hex}.wav"
         try:
             ensure_wav(str(raw_path), str(temp_path))
+            check_prompt_duration(str(temp_path))
             prompt_audio = str(temp_path)
         finally:
             if raw_path.exists():
@@ -1133,6 +1162,7 @@ async def tts_async(
         prompt_path = INPUT_DIR / f"prompt_{task_id}.wav"
         try:
             ensure_wav(str(raw_path), str(prompt_path))
+            check_prompt_duration(str(prompt_path))
         finally:
             if raw_path.exists():
                 raw_path.unlink()
@@ -1184,6 +1214,11 @@ async def download(filename: str):
         raise HTTPException(404, "File not found")
     return FileResponse(str(path), media_type="audio/wav", filename=filename)
 
+@app.get("/favicon.ico")
+async def favicon():
+    """浏览器自动请求 favicon，无图标时返回 204 避免控制台 404 报错"""
+    return Response(status_code=204)
+
 # ============== 长文本分段合成 API ==============
 
 @app.post("/api/tts/batch/split")
@@ -1228,6 +1263,7 @@ async def create_batch_tts(
         prompt_path = INPUT_DIR / f"batch_prompt_{task_id}.wav"
         try:
             ensure_wav(str(raw_path), str(prompt_path))
+            check_prompt_duration(str(prompt_path))
         finally:
             if raw_path.exists():
                 raw_path.unlink()
@@ -1714,7 +1750,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     }
                 }
                 
-                if (!res.ok) throw new Error(await res.text());
+                if (!res.ok) {
+                    let msg = await res.text();
+                    try { msg = JSON.parse(msg).detail || msg; } catch (_) {}
+                    throw new Error(msg);
+                }
                 
                 if (isStream) {
                     // Initialize Web Audio API
@@ -2034,6 +2074,66 @@ if __name__ == "__main__":
             "本服务只允许通过项目目录下的 启动.bat 手动启动，已拒绝启动。\n"
         )
         sys.exit(1)
-    import uvicorn
+
     port = int(os.getenv("PORT", "8188"))
+
+    # 重复启动守卫（2026-09-06 新增）：模型在 uvicorn lifespan 里加载且端口绑定在其后，
+    # 第二个实例会先把 5GB+ 模型塞进显存、绑端口时才失败。先探测端口，被占用直接退出。
+    import socket as _socket
+    _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        _probe.bind(("0.0.0.0", port))
+    except OSError:
+        print(
+            f"[启动守卫] 端口 {port} 已被占用：服务已在运行，本窗口自动退出，不会重复加载模型。\n"
+            f"直接用浏览器打开 http://localhost:{port} 即可使用。",
+            flush=True,
+        )
+        sys.exit(0)
+    finally:
+        _probe.close()
+
+    # 黑框实时日志（2026-09-06 新增）：_run_server.bat 不再把输出重定向进文件，
+    # 而是由这里把 stdout/stderr 同步写往控制台（黑框可见运行状态）与
+    # runtime\server.log（留档）。关黑框 = 进程被杀，日志同步停止。
+    _log_file = os.getenv("YIJU_LOG_FILE")
+    if _log_file:
+        class _Tee:
+            """写穿到原流并追加到日志文件；文件写失败不影响控制台输出"""
+
+            def __init__(self, stream, path):
+                self._stream = stream
+                self._file = open(path, "a", buffering=1, encoding="utf-8", errors="replace")
+
+            def write(self, data):
+                try:
+                    self._file.write(data)
+                except Exception:
+                    pass
+                return self._stream.write(data)
+
+            def flush(self):
+                try:
+                    self._file.flush()
+                except Exception:
+                    pass
+                self._stream.flush()
+
+            def isatty(self):
+                # uvicorn 的日志着色器依赖 isatty() 判断是否加颜色码，必须透传
+                try:
+                    return self._stream.isatty()
+                except Exception:
+                    return False
+
+            def writelines(self, lines):
+                for line in lines:
+                    self.write(line)
+
+        Path(_log_file).parent.mkdir(parents=True, exist_ok=True)
+        sys.stdout = _Tee(sys.stdout, _log_file)
+        sys.stderr = _Tee(sys.stderr, _log_file)
+        print(f"[LOG] 控制台与日志文件双写已开启: {_log_file}", flush=True)
+
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=port)

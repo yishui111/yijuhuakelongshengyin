@@ -142,6 +142,7 @@ rem ---------- 6. already running? ----------
 powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'app\.py cosyvoice-app' }; if ($p) { exit 0 } else { exit 1 }" >nul 2>&1
 if not errorlevel 1 (
     echo  [INFO] Service is already running: http://localhost:8188
+    start "" "http://localhost:8188"
     pause
     exit /b 0
 )

@@ -48,6 +48,7 @@
 
 ## 5. 已知问题 / TODO / 安全注意
 
+- 引擎 `frontend._extract_speech_token` 对参考音频有 30 秒硬限制（超限 assert 崩溃）；app.py 已在各参考音频入口（建音色 / tts / tts_async / batch / openai_speech / batch 后台）用 `check_prompt_duration()` 拦截并返回 400，新增合成入口时记得带上该校验（2026-09-05 修复「超长参考音频导致流式响应 ERR_INCOMPLETE_CHUNKED_ENCODING」）
 - 引擎源码由部署脚本从 GitHub 拉取「当前 master」，若上游接口变动可能需同步适配 app.py（本机验过的引擎版本为镜像内快照 + 少量本地补丁）
 - `mcp_server.py` 默认指向 CosyVoice2-0.5B（与主服务 v3 不同），用前需自行准备对应权重目录
 - 声音克隆需遵守本人/授权声音使用规范

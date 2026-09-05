@@ -10,7 +10,7 @@
 
 | 组件 | 作用 |
 | ---- | ---- |
-| `code/app.py` | **主服务**（自研，单文件 ~2000 行）：FastAPI（端口 8188）+ 内嵌 Web 控制台 HTML + 零样本克隆/长文本分段合成/ASR 质量自检/OpenAI 兼容 API；带启动守卫（需 env `YIJU_MANUAL_START=1`，由 `_run_server.bat` 设置，防后台误拉起） |
+| `code/app.py` | **主服务**（自研，单文件 ~2000 行）：FastAPI（端口 8189）+ 内嵌 Web 控制台 HTML + 零样本克隆/长文本分段合成/ASR 质量自检/OpenAI 兼容 API；带启动守卫（需 env `YIJU_MANUAL_START=1`，由 `_run_server.bat` 设置，防后台误拉起）+ 端口探测守卫（重复启动在加载模型前直接退出，防双实例爆显存）+ 日志 tee（env `YIJU_LOG_FILE` 时 stdout/stderr 同步写控制台与 `runtime\server.log`，文件侧剥离 ANSI 色码；注意 uvicorn 着色器依赖 `sys.stdout.isatty()`，`_Tee` 必须实现该方法）+ 全局推理锁 `_infer_lock`（页面/批量/OpenAI 接口共用，同一时间只跑一个合成；批量按句持锁）+ 耗时端点（tts/openai_speech/建音色/转写/批量/异步）均为同步 `def` 走线程池，合成期间页面仍可响应（2026-09-06；上传读取用 `file.read()` 同步版） |
 | `code/model.py` | Fun-ASR-Nano-2512 的远程代码（`funasr.AutoModel(..., remote_code="./model.py")` 按 CWD 加载，**必需**；模型快照里没有该文件） |
 | `code/mcp_server.py` | 可选 MCP 服务（实验性，需 `pip install fastmcp`；默认模型目录 CosyVoice2-0.5B 可经 env `MODEL_DIR` 覆盖） |
 | `code/cosyvoice/` `code/third_party/` | ⚠️ **第三方引擎，不入库**：部署时由 `tools\download_engine.bat` 拉取（FunAudioLLM/CosyVoice 的 cosyvoice 包 + shivammehta25/Matcha-TTS） |
@@ -18,15 +18,15 @@
 | `tools/download_engine.bat` `download_model.bat` | 首次部署下载器（ASCII bat，start.bat 自动调用/提示） |
 | `tools/extract_image.py` | 历史工具（从旧 image.tar 提取文件），image.tar 已不随仓库分发，仅存档 |
 | `start.bat` `stop.bat` `status.bat` | 一键启停/状态（ASCII 实现）；`启动.bat` `关闭.bat` `状态.bat` 为同名包装（内容纯 ASCII，仅文件名中文） |
-| `_run_server.bat` | 服务进程启动器：设 env（INPUT/OUTPUT/VOICES_DIR、MODEL_DIR、MODELSCOPE_CACHE、PORT=8188、YIJU_MANUAL_START=1）→ `venv\python -X utf8 app.py cosyvoice-app` → 日志 `runtime\server.log` |
+| `_run_server.bat` | 服务进程启动器：设 env（INPUT/OUTPUT/VOICES_DIR、MODEL_DIR、MODELSCOPE_CACHE、PORT=8189、YIJU_MANUAL_START=1、YIJU_LOG_FILE）→ 先做重复启动守卫（已有 `app.py cosyvoice-app` 进程则拒绝）→ `chcp 65001` → `venv\python -X utf8 app.py cosyvoice-app`（**输出直进黑框实时显示**，文件留档由 app.py tee 完成；2026-09-06 起不再 shell 重定向） |
 | `tests/` | 回归测试（需服务运行：test_tts.ps1 / batch_tts_test.py；tts_native_test.py 直连引擎排障） |
 | `requirements.txt` | 依赖锁定（torch 2.11.0+cu128、funasr 1.2.9、fastapi 等）；`openai-whisper==20231117` 由 start.bat 单独 `--no-build-isolation` 安装 |
 | `docker-compose.yml` | ⚠️ 旧 Docker 方案遗留（存档，已不使用） |
 
 - 技术栈：Python 3.10-3.13 + FastAPI + PyTorch(CUDA) + Fun-CosyVoice3-0.5B + Fun-ASR-Nano；无前端构建，UI 内嵌 app.py
-- 端口：**8188**（Web/API：http://localhost:8188 ，Swagger：/docs）
+- 端口：**8189**（Web/API：http://localhost:8189 ，Swagger：/docs）
 - 数据目录：`voices\` 音色库、`output\` 合成 wav、`input\` 临时、`cache\modelscope` 模型缓存、`runtime\` 日志
-- 启动链：`start.bat` →（建 venv/装依赖/拉引擎/提示下模型）→ `_run_server.bat`（新窗口）→ app.py 载入模型约 1-3 分钟 → `/health` healthy → 开浏览器
+- 启动链：`start.bat` →（建 venv/装依赖/拉引擎/提示下模型）→ `_run_server.bat`（新窗口）→ app.py 载入 CosyVoice + Fun-ASR 约 2-5 分钟 → `/health` healthy → 开浏览器
 - 停止：`stop.bat` 按进程命令行含 `app.py cosyvoice-app` 精确匹配停止（防误杀其他 python）
 
 ## 3. 本仓库 = GitHub 公开裁剪版（重要边界）
@@ -49,6 +49,7 @@
 ## 5. 已知问题 / TODO / 安全注意
 
 - 引擎 `frontend._extract_speech_token` 对参考音频有 30 秒硬限制（超限 assert 崩溃）；app.py 已在各参考音频入口（建音色 / tts / tts_async / batch / openai_speech / batch 后台）用 `check_prompt_duration()` 拦截并返回 400，新增合成入口时记得带上该校验（2026-09-05 修复「超长参考音频导致流式响应 ERR_INCOMPLETE_CHUNKED_ENCODING」）
+- **Fun-ASR 加载会把 torch 全局默认 dtype 翻成 bfloat16**（funasr 构建 bf16 LLM 时触发），此后未显式指定 dtype 的张量工厂调用全部被污染：页面「上传参考音频」走现场提取（whisper mel / kaldi.fbank 在 CPU 上重算），精度受损后合成直接退化为乱码循环（token ±1、说话人 embedding 漂移）；已预热音色的缓存命中路径（OpenAI 接口）不受影响。修复（2026-09-06）：Fun-ASR 改为 lifespan 内同步加载（开始对外服务前完成，启动时长相应变为 2-5 分钟），并在 get_asr_model 加载完成后 `torch.set_default_dtype(torch.float32)` 恢复全局默认。勿改回后台预热线程。
 - 引擎源码由部署脚本从 GitHub 拉取「当前 master」，若上游接口变动可能需同步适配 app.py（本机验过的引擎版本为镜像内快照 + 少量本地补丁）
 - `mcp_server.py` 默认指向 CosyVoice2-0.5B（与主服务 v3 不同），用前需自行准备对应权重目录
 - 声音克隆需遵守本人/授权声音使用规范
@@ -61,7 +62,7 @@
 - 中文文档用 UTF-8（无 BOM）；模型/引擎版本或端口变化时更新本文件与 DEPLOY.md
 ---
 ### 关键点（2026-09-02 上传整理补充）
-- code/app.py = 自研 FastAPI（端口 8188，中文 Web UI + OpenAI 兼容 API）；start.bat 首次运行自动：建 venv→装依赖→tools\download_engine.bat 拉 CosyVoice 引擎(上游 master)→引导下载权重
+- code/app.py = 自研 FastAPI（端口 8189，中文 Web UI + OpenAI 兼容 API）；start.bat 首次运行自动：建 venv→装依赖→tools\download_engine.bat 拉 CosyVoice 引擎(上游 master)→引导下载权重
 - 权重 Fun-CosyVoice3-0.5B(~7GB) 不入库（tools\download_model.bat）；Matcha-TTS 经 download_engine 拉取
 - code/model.py 为 Fun-ASR 远程代码（必需）；其中 6 个局部变量(speech_tok 等)改名只为规避密钥扫描正则，语义未变，勿“顺手改回”
 - requirements 移除 tiktoken 显式锁（openai-whisper 自动带入，注释已说明）

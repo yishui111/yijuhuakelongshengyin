@@ -34,6 +34,10 @@ from cosyvoice.utils.file_utils import load_wav
 # Fun-ASR-Nano for auto transcription
 _asr_model = None
 _asr_lock = threading.Lock()
+# 全局推理锁：同一时间只允许一个合成任务占用 CosyVoice 模型（页面/批量/OpenAI 接口共用）。
+# CosyVoice 内部是 Qwen LLM 逐 token 生成，并发 forward 打进同一模型实例可能音频错乱或崩溃；
+# 批量后台线程按句持锁，句与句之间会释放，页面请求仍可穿插响应。
+_infer_lock = threading.Lock()
 
 def get_asr_model():
     global _asr_model
@@ -50,6 +54,11 @@ def get_asr_model():
                     device="cuda:0",
                     disable_update=True,
                 )
+                # Fun-ASR 加载完会把 torch 全局默认 dtype 留在 bfloat16（见 frontend._extract_spk_embedding
+                # 处作者的显式 float32 补丁注释）。此后所有未显式指定 dtype 的张量工厂调用都被污染成
+                # bf16 —— whisper mel / kaldi.fbank 等 CPU 特征提取精度受损，页面"上传参考音频现场提取"
+                # 路径的合成会退化成乱码（2026-09-06 排查定位）。加载完成后恢复 float32。
+                torch.set_default_dtype(torch.float32)
                 print("Fun-ASR-Nano loaded!")
     return _asr_model
 
@@ -408,19 +417,17 @@ gpu_manager = GPUManager()
 async def lifespan(app: FastAPI):
     # 启动时预热模型
     gpu_manager.preload()
-    # 后台预热 Fun-ASR（用于合成后泄漏检测），不阻塞启动
-    threading.Thread(target=_warmup_asr, daemon=True).start()
-    yield
-    # 关闭时不自动卸载（保持模型在显存中）
-
-def _warmup_asr():
-    """后台加载 Fun-ASR 模型（首次加载较慢，避免拖慢第一个请求）"""
+    # Fun-ASR 必须在开始对外服务前同步加载（2026-09-06 由后台线程改为同步）：
+    # 其加载过程会把 torch 全局默认 dtype 翻成 bfloat16（见 get_asr_model 内注释），
+    # 若放后台线程，加载窗口期内到达的合成请求会拿到被 bf16 污染的现场提取特征，
+    # 导致页面上传参考音频合成乱码。同步加载完成后恢复 float32，竞态窗口归零。
+    # 加载失败不阻断启动：转写/质量检测功能退化，合成不受影响（走惰性加载）。
     try:
-        print("[ASR] Warming up Fun-ASR in background...", flush=True)
         get_asr_model()
-        print("[ASR] Fun-ASR ready", flush=True)
     except Exception as e:
         print(f"[ASR] Warmup failed (will lazy-load): {e}", flush=True)
+    yield
+    # 关闭时不自动卸载（保持模型在显存中）
 
 app = FastAPI(
     title="CosyVoice API",
@@ -586,7 +593,9 @@ def _process_batch(task_id: str, sentences: list, mode: str, voice_id: str,
                     ptext = f"You are a helpful assistant.<|endofprompt|>{base[:50]}"
                     output = model.inference_zero_shot(sentence, ptext, prompt_audio, stream=False, speed=speed)
 
-                speeches = [chunk['tts_speech'] for chunk in output]
+                # 全局推理锁：批量逐句合成与页面/OpenAI 请求共用一把锁，避免并发打进同一模型
+                with _infer_lock:
+                    speeches = [chunk['tts_speech'] for chunk in output]
                 if not speeches:
                     raise ValueError("模型未产出音频")
                 full_speech = torch.cat(speeches, dim=1)
@@ -623,7 +632,8 @@ def generate_audio_stream(model_output, sample_rate: int, cleanup_path: str = No
     is_first_chunk = True
     dc_offset = 0.0
     alpha = 0.001  # DC offset sliding average coefficient
-    
+
+    _infer_lock.acquire()
     try:
         for chunk in model_output:
             wav_chunk = chunk['tts_speech'].numpy().flatten()
@@ -644,6 +654,7 @@ def generate_audio_stream(model_output, sample_rate: int, cleanup_path: str = No
             audio = (wav_chunk * 32767).astype(np.int16).tobytes()
             yield audio
     finally:
+        _infer_lock.release()
         # Cleanup temp file after streaming completes
         if cleanup_path and Path(cleanup_path).exists():
             Path(cleanup_path).unlink()
@@ -670,7 +681,7 @@ async def dump_request_body(request, call_next):
     return await call_next(request)
 
 @app.post("/v1/audio/speech")
-async def openai_speech(request: SpeechRequest):
+def openai_speech(request: SpeechRequest):
     """OpenAI-compatible TTS API"""
     model = gpu_manager.get_model()
     # 调试日志：记录完整请求，对比 Open WebUI 链路与直连的差异
@@ -790,7 +801,8 @@ async def openai_speech(request: SpeechRequest):
     last_quality = "ok"
     last_transcribed = ""
     for attempt in range(1, max_attempts + 1):
-        speeches = [chunk['tts_speech'] for chunk in output]
+        with _infer_lock:
+            speeches = [chunk['tts_speech'] for chunk in output]
         if not speeches:
             # 模型未产出任何音频（常见原因：输入为空/乱码/无法分词，如客户端编码错误）
             raise HTTPException(422, f"合成失败：模型未产出音频。请检查输入文本是否为空或包含乱码（当前 input={request.input!r}）")
@@ -864,13 +876,13 @@ async def openai_speech(request: SpeechRequest):
             return FileResponse(output_path, media_type="audio/wav", filename=filename)
 
 @app.post("/v1/voices/create")
-async def create_voice(
+def create_voice(
     audio: UploadFile = File(...),
     name: str = Form(...),
     text: str = Form("")
 ):
     """创建自定义音色"""
-    content = await audio.read()
+    content = audio.file.read()
     
     # 统一转成 24k 单声道 wav 再保存（m4a/webm 需 ffmpeg 解码；确保后续推理/转写都能用）
     raw_path = INPUT_DIR / f"voice_raw_{uuid.uuid4().hex}.bin"
@@ -931,7 +943,7 @@ async def list_voices():
     }
 
 @app.post("/v1/voices/{voice_id}/retranscribe")
-async def retranscribe_voice(voice_id: str):
+def retranscribe_voice(voice_id: str):
     """用 Fun-ASR 重新转写参考音频，修正音色的 text（修复注册文本错误导致的克隆不准）"""
     voice = voice_manager.get(voice_id)
     if not voice:
@@ -964,14 +976,14 @@ async def openai_list_voices():
     return {"voices": voices}
 
 @app.post("/v1/audio/transcriptions")
-async def openai_transcriptions(audio: UploadFile = File(...)):
+def openai_transcriptions(audio: UploadFile = File(...)):
     """OpenAI 兼容的语音识别接口（供 api-gateway / 手机端"打电话"使用）
 
     接收用户语音（wav/mp3/m4a/webm 等），用 Fun-ASR-Nano 转写为文本。
     返回格式：{"text": "..."}
     """
     import subprocess
-    content = await audio.read()
+    content = audio.file.read()
     if not content:
         raise HTTPException(400, "空音频文件")
 
@@ -1048,7 +1060,7 @@ async def list_speakers():
     return {"speakers": model.list_available_spks()}
 
 @app.post("/api/tts")
-async def tts(
+def tts(
     text: str = Form(...),
     mode: str = Form("zero_shot"),
     prompt_text: str = Form(""),
@@ -1062,7 +1074,7 @@ async def tts(
     prompt_audio = None
     
     if prompt_wav:
-        content = await prompt_wav.read()
+        content = prompt_wav.file.read()
         # 统一转成 24k 单声道 wav（手机录音常见 m4a/webm，libsndfile 无法解码）
         raw_path = INPUT_DIR / f"prompt_raw_{uuid.uuid4().hex}.bin"
         raw_path.write_bytes(content)
@@ -1117,21 +1129,46 @@ async def tts(
                 media_type="audio/pcm"
             )
         
-        # Collect all chunks
-        speeches = []
-        for chunk in output:
-            speeches.append(chunk['tts_speech'])
-        
-        if not speeches:
-            raise HTTPException(422, f"合成失败：模型未产出音频。请检查输入文本是否为空或包含乱码（当前 text={text!r}）")
-        full_speech = torch.cat(speeches, dim=1)
-        filename = f"tts_{uuid.uuid4().hex}.wav"
-        output_path = save_audio(full_speech, model.sample_rate, filename)
-        
+        # 非流式：合成 + 质量检测重试（与 /v1/audio/speech 同一套兜底；此前页面接口没有检测，
+        # zero_shot 概率性复述/乱码会直接返回给用户）。策略：attempt1 原样合成 → 重试加扰动词 +
+        # endofprompt 格式 → 最后一次 cross_lingual 兜底（内容优先）。仅 zero_shot 且有参考文本时检测。
+        prompt_base = prompt_text or ""
+        do_check = bool(mode == "zero_shot" and prompt_base.strip() and text.strip())
+        for attempt in range(1, 4):  # max_attempts = 3
+            with _infer_lock:
+                speeches = [chunk['tts_speech'] for chunk in output]
+            if not speeches:
+                raise HTTPException(422, f"合成失败：模型未产出音频。请检查输入文本是否为空或包含乱码（当前 text={text!r}）")
+            full_speech = torch.cat(speeches, dim=1)
+            filename = f"tts_{uuid.uuid4().hex}.wav"
+            output_path = save_audio(full_speech, model.sample_rate, filename)
+            if not do_check:
+                break
+            try:
+                transcribed = transcribe_audio(str(output_path))
+                quality = check_tts_quality(transcribed, text, prompt_base)
+                if quality == "ok":
+                    print(f"[TTS-CHECK] /api/tts attempt={attempt} OK transcribed={transcribed!r}", flush=True)
+                    break
+                print(f"[TTS-CHECK] /api/tts attempt={attempt} {quality.upper()} transcribed={transcribed!r} -> retry", flush=True)
+            except Exception as e:
+                # 检测失败不阻塞正常返回
+                print(f"[TTS-CHECK] /api/tts attempt={attempt} check failed: {e}, returning as-is", flush=True)
+                break
+            if attempt < 3:
+                jitter = ["嗯，", "呃，", "哦，", "啊，"][(attempt - 1) % 4]
+                prompt_text = f"You are a helpful assistant.<|endofprompt|>{jitter}{prompt_base[:50]}"
+                if attempt == 2:
+                    print("[TTS-CHECK] /api/tts 最后一次重试改用 cross_lingual 兜底", flush=True)
+                    output = model.inference_cross_lingual(text, prompt_audio, stream=False, speed=speed)
+                else:
+                    output = model.inference_zero_shot(text, prompt_text, prompt_audio, stream=False, speed=speed)
+            # attempt==3：已到最大次数，返回最后一次结果（不理想但可用）
+
         # Cleanup temp file for non-streaming mode
         if prompt_audio and Path(prompt_audio).exists():
             Path(prompt_audio).unlink()
-        
+
         return FileResponse(output_path, media_type="audio/wav", filename=filename)
     
     except Exception as e:
@@ -1141,7 +1178,7 @@ async def tts(
         raise
 
 @app.post("/api/tts/async")
-async def tts_async(
+def tts_async(
     background_tasks: BackgroundTasks,
     text: str = Form(...),
     mode: str = Form("zero_shot"),
@@ -1156,7 +1193,7 @@ async def tts_async(
     
     prompt_path = None
     if prompt_wav:
-        content = await prompt_wav.read()
+        content = prompt_wav.file.read()
         raw_path = INPUT_DIR / f"prompt_raw_{task_id}.bin"
         raw_path.write_bytes(content)
         prompt_path = INPUT_DIR / f"prompt_{task_id}.wav"
@@ -1184,7 +1221,8 @@ async def tts_async(
                 else:
                     output = model.inference_instruct(text, spk_id, instruct_text, stream=False, speed=speed)
             
-            speeches = [chunk['tts_speech'] for chunk in output]
+            with _infer_lock:
+                speeches = [chunk['tts_speech'] for chunk in output]
             if not speeches:
                 raise ValueError(f"模型未产出音频（text={text!r}）")
             full_speech = torch.cat(speeches, dim=1)
@@ -1233,7 +1271,7 @@ async def batch_split_preview(payload: dict):
     }
 
 @app.post("/api/tts/batch")
-async def create_batch_tts(
+def create_batch_tts(
     text: str = Form(...),
     mode: str = Form("zero_shot"),
     voice_id: str = Form(""),
@@ -1257,7 +1295,7 @@ async def create_batch_tts(
     task_id = uuid.uuid4().hex
     prompt_path = None
     if prompt_wav:
-        content = await prompt_wav.read()
+        content = prompt_wav.file.read()
         raw_path = INPUT_DIR / f"batch_raw_{task_id}.bin"
         raw_path.write_bytes(content)
         prompt_path = INPUT_DIR / f"batch_prompt_{task_id}.wav"
@@ -1313,7 +1351,7 @@ async def get_batch_task(task_id: str):
     }
 
 @app.get("/api/tts/batch/{task_id}/download")
-async def download_batch_zip(task_id: str):
+def download_batch_zip(task_id: str):
     """一键下载全部已完成段落（打包 zip）"""
     if task_id not in batch_tasks:
         raise HTTPException(404, "Task not found")
@@ -2075,7 +2113,7 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    port = int(os.getenv("PORT", "8188"))
+    port = int(os.getenv("PORT", "8189"))
 
     # 重复启动守卫（2026-09-06 新增）：模型在 uvicorn lifespan 里加载且端口绑定在其后，
     # 第二个实例会先把 5GB+ 模型塞进显存、绑端口时才失败。先探测端口，被占用直接退出。

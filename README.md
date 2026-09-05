@@ -32,6 +32,7 @@
 
 - 🎤 **零样本声音克隆**：上传 3-30 秒参考音频 + 参考文本，自动创建自定义音色（页面可试听；超过 30 秒的参考音频会被拒绝并提示截取）
 - 🔊 **TTS 合成**（OpenAI 兼容 `/v1/audio/speech`，支持 speed/stream、自定义与预置音色）
+- 🖥 **黑框即状态**：启动后的控制台窗口实时滚动运行日志（同时留档 `runtime\server.log`）；关闭黑框即停止服务并释放显存，重复双击启动有守卫不会拉起第二个实例
 - 📄 **长文本分段合成**（`/api/tts/batch`）：按「。」自动逐句合成 + 实时进度 + 一键 zip 下载
 - 🧪 **合成质量自检**：Fun-ASR-Nano 检测复述泄漏与丢字，自动重试（最多 3 次）
 - 🗣 **ASR 转写**（`/v1/audio/transcriptions`）：语音转文字，附带「音色参考文本一键重转写」纠错
@@ -43,7 +44,7 @@
 ```
 yijuhuakelongshengyin/
 ├── code/                       # 自研服务代码（本仓库核心）
-│   ├── app.py                  #   主服务：FastAPI + 内嵌 Web 控制台（端口 8188）
+│   ├── app.py                  #   主服务：FastAPI + 内嵌 Web 控制台（端口 8189）
 │   ├── model.py                #   Fun-ASR 远程代码（语音识别/质量自检必需）
 │   ├── mcp_server.py           #   可选 MCP 服务（实验性）
 │   ├── cosyvoice/              #   ⚠️ 第三方引擎（不入库，部署时自动下载）
@@ -89,14 +90,14 @@ cd yijuhuakelongshengyin
 1. 创建 `venv` 并安装依赖（torch ~3GB，需 5-15 分钟）；
 2. 自动拉取第三方引擎代码：`tools\download_engine.bat`（CosyVoice 引擎 + Matcha-TTS）；
 3. 提示下载模型权重：`tools\download_model.bat`（Fun-CosyVoice3-0.5B，约 7GB）；
-4. 启动服务并等待模型加载（约 1-3 分钟），自动打开浏览器。
+4. 启动服务并等待模型加载（约 2-5 分钟），自动打开浏览器。
 
 ### 3. 验证
 
-浏览器访问 <http://localhost:8188>（API 文档 <http://localhost:8188/docs>），页面可克隆音色并合成试听；也可用命令行验证：
+浏览器访问 <http://localhost:8189>（API 文档 <http://localhost:8189/docs>），页面可克隆音色并合成试听；也可用命令行验证：
 
 ```bash
-curl http://localhost:8188/health
+curl http://localhost:8189/health
 # => {"status":"healthy", ...}
 ```
 
@@ -132,11 +133,11 @@ git push origin main   # 推送前把 README/DEPLOY 中的 yishui111 替换为�
 ## ❓ 常见问题（FAQ）
 
 - **Q：双击 start.bat 闪退 / 报找不到 Python？** A：需安装 Python 3.10-3.13 并勾选 "py launcher"（https://www.python.org/downloads/）；3.14 没有 kaldifst/wetext 轮子不可用。手动打开 cmd 运行 `start.bat` 可看到具体报错。
-- **Q：模型加载要多久？** A：首次 1-3 分钟属正常（加载约 127s、占用显存约 3.2GB），期间 `/health` 可能连不上；之后每次启动约 1 分钟。
+- **Q：模型加载要多久？** A：正常 2-5 分钟（CosyVoice 与 Fun-ASR 两个模型先后加载，占用显存约 5-6GB），期间 `/health` 可能连不上；日志出现「Fun-ASR ready」即完全就绪。
 - **Q：首次 TTS 很慢？** A：首次会额外下载/加载 Fun-ASR 检测模型（后台预热），之后每次合成约 3-8 秒。
 - **Q：长文本整体合成效果差 / 慢？** A：用页面「📄 长文本分段合成」按句逐句合成，每句可单独下载或一键打包 zip。
 - **Q：合成结果带参考文本（复述）？** A：服务已内置泄漏检测 + 自动重试（zero_shot ↔ cross_lingual 兜底），无需手动处理。
-- **Q：怎么改端口？** A：编辑 `_run_server.bat` 中 `set PORT=8188`（也支持环境变量 `PORT`）。
+- **Q：怎么改端口？** A：编辑 `_run_server.bat` 中 `set PORT=8189`（也支持环境变量 `PORT`）。
 - **Q：报 torch 相关 CUDA 错误？** A：确认 NVIDIA 驱动 ≥ 570（torch 2.11 为 cu128 构建）；本机非 NVIDIA 显卡无法推理。
 - **Q：image.tar / docker-compose.yml 是干嘛的？** A：早期 Docker 方案遗留（image.tar 约 17GB 已可删除），本项目已迁移为 Windows 原生运行，不再需要 Docker。
 

@@ -1,6 +1,6 @@
 ﻿# CosyVoice 功能测试脚本
 # 用法: powershell -ExecutionPolicy Bypass -File .\tests\test_tts.ps1
-param([string]$BaseUrl = "http://localhost:8188")
+param([string]$BaseUrl = "http://localhost:8189")
 $ErrorActionPreference = "Stop"
 $outDir = Join-Path $PSScriptRoot "output"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null

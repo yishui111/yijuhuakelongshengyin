@@ -141,8 +141,8 @@ if /i "%DL%"=="y" (
 rem ---------- 6. already running? ----------
 powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'app\.py cosyvoice-app' }; if ($p) { exit 0 } else { exit 1 }" >nul 2>&1
 if not errorlevel 1 (
-    echo  [INFO] Service is already running: http://localhost:8188
-    start "" "http://localhost:8188"
+    echo  [INFO] Service is already running: http://localhost:8189
+    start "" "http://localhost:8189"
     pause
     exit /b 0
 )
@@ -162,7 +162,7 @@ if %n% gtr 130 (
     pause
     exit /b 1
 )
-powershell -NoProfile -Command "try { $r = Invoke-RestMethod -Uri 'http://localhost:8188/health' -TimeoutSec 3; if ($r.status -eq 'healthy') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
+powershell -NoProfile -Command "try { $r = Invoke-RestMethod -Uri 'http://localhost:8189/health' -TimeoutSec 3; if ($r.status -eq 'healthy') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 goto ready
 timeout /t 5 /nobreak >nul
 goto wait
@@ -171,11 +171,11 @@ goto wait
 echo.
 echo  ================================================
 echo   Startup OK!
-echo   Web UI / API : http://localhost:8188
-echo   API docs     : http://localhost:8188/docs
+echo   Web UI / API : http://localhost:8189
+echo   API docs     : http://localhost:8189/docs
 echo   Log          : runtime\server.log
 echo  ================================================
 echo.
-start "" "http://localhost:8188"
+start "" "http://localhost:8189"
 pause
 exit /b 0

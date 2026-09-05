@@ -62,7 +62,7 @@
    huggingface-cli download FunAudioLLM/Fun-CosyVoice3-0.5B --local-dir code/pretrained_models/Fun-CosyVoice3-0.5B
    ```
    > 权重必须落在 **`code\pretrained_models\Fun-CosyVoice3-0.5B\`**（服务按相对路径加载，目录内须含 `cosyvoice3.yaml`、`llm.pt`、`flow.pt`、`hift.pt`、`campplus.onnx`、`speech_tokenizer_v3.onnx` 等）。
-6. **启动服务**：自动等待模型加载完成（约 1-3 分钟），成功后在浏览器打开 http://localhost:8188 。
+6. **启动服务**：自动等待模型加载完成（约 2-5 分钟，含 CosyVoice 与 Fun-ASR 两个模型），成功后在浏览器打开 http://localhost:8189 。
 
 > 全程各步骤幂等：依赖装过、引擎/模型已存在时会自动跳过。
 
@@ -70,14 +70,14 @@
 
 | 操作 | 方式 |
 | ---- | ---- |
-| 启动 | 双击 `启动.bat` 或 `start.bat`（模型加载约 1-3 分钟，日志在 `runtime\server.log`） |
+| 启动 | 双击 `启动.bat` 或 `start.bat`（模型加载约 2-5 分钟，日志在 `runtime\server.log`） |
 | 停止 | 双击 `关闭.bat` 或 `stop.bat`（按进程命令行精确匹配 `app.py cosyvoice-app` 停止） |
 | 状态 | 双击 `状态.bat` 或 `status.bat`（查询 /health 与 GPU 占用） |
 
 命令行验证：
 
 ```powershell
-curl http://localhost:8188/health
+curl http://localhost:8189/health
 # => {"status":"healthy","gpu":{...,"model_loaded":true,...}}
 ```
 
@@ -85,7 +85,7 @@ curl http://localhost:8188/health
 
 | 项 | 默认值 | 如何修改 |
 |----|--------|----------|
-| 端口 | 8188 | `_run_server.bat` 中 `set PORT=8188`（或环境变量 `PORT`） |
+| 端口 | 8189 | `_run_server.bat` 中 `set PORT=8189`（或环境变量 `PORT`） |
 | 音色库 | `voices\` | `_run_server.bat` 中 `VOICES_DIR` |
 | 输出音频 | `output\` | `_run_server.bat` 中 `OUTPUT_DIR` |
 | 输入临时区 | `input\` | `_run_server.bat` 中 `INPUT_DIR` |

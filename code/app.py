@@ -2098,8 +2098,11 @@ if __name__ == "__main__":
     # runtime\server.log（留档）。关黑框 = 进程被杀，日志同步停止。
     _log_file = os.getenv("YIJU_LOG_FILE")
     if _log_file:
+        import re as _ansi_re
+        _ansi_pattern = _ansi_re.compile(r"\x1b\[[0-9;]*m")
+
         class _Tee:
-            """写穿到原流并追加到日志文件；文件写失败不影响控制台输出"""
+            """写穿到原流并追加到日志文件；文件侧剥离 ANSI 颜色码，写失败不影响控制台输出"""
 
             def __init__(self, stream, path):
                 self._stream = stream
@@ -2107,7 +2110,7 @@ if __name__ == "__main__":
 
             def write(self, data):
                 try:
-                    self._file.write(data)
+                    self._file.write(_ansi_pattern.sub("", data))
                 except Exception:
                     pass
                 return self._stream.write(data)

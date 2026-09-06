@@ -10,18 +10,15 @@ import zipfile
 import time
 import uuid
 import json
-import asyncio
 import threading
 from pathlib import Path
-from typing import Optional, Generator
+from typing import Optional
 from contextlib import asynccontextmanager
 
 import torch
-import torchaudio
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Response
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -29,7 +26,6 @@ ROOT_DIR = Path(__file__).parent
 sys.path.insert(0, str(ROOT_DIR / "third_party/Matcha-TTS"))
 
 from cosyvoice.cli.cosyvoice import AutoModel
-from cosyvoice.utils.file_utils import load_wav
 
 # Fun-ASR-Nano for auto transcription
 _asr_model = None
@@ -329,7 +325,6 @@ class GPUManager:
         self.model = None
         self.model_dir = None
         self.lock = threading.Lock()
-        self.prompt_cache = {}  # 缓存 prompt 特征
         
     def get_model(self, model_dir: str = None):
         with self.lock:
@@ -379,20 +374,11 @@ class GPUManager:
             del self.model
             self.model = None
             self.model_dir = None
-            self.prompt_cache.clear()
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             print("GPU memory released")
-    
-    def get_prompt_cache(self, voice_id: str):
-        """获取缓存的 prompt 特征"""
-        return self.prompt_cache.get(voice_id)
-    
-    def set_prompt_cache(self, voice_id: str, cache_data: dict):
-        """缓存 prompt 特征"""
-        self.prompt_cache[voice_id] = cache_data
-    
+
     def status(self) -> dict:
         gpu_info = {"available": torch.cuda.is_available()}
         if torch.cuda.is_available():
@@ -460,7 +446,6 @@ app.add_middleware(
 # 全局异常日志：任何未捕获异常都写入 runtime\server_errors.log（含完整堆栈），
 # 方便在输出被窗口吞掉时排查 500
 import traceback as _tb
-from starlette.responses import Response as _StarletteResponse
 
 @app.middleware("http")
 async def log_500_errors(request, call_next):
@@ -695,21 +680,9 @@ def openai_speech(request: SpeechRequest):
         prompt_audio = custom_voice["audio_path"]
         # 存量音色可能超 30s（引擎 assert 崩溃点），进入推理前拦截
         check_prompt_duration(prompt_audio)
-        prompt_text = request.prompt_text or custom_voice.get("text", "") or ""
-        if prompt_text.strip():
-            # 完整参考文本保留用于音色克隆（不截断，避免破坏特征提取）
-            full_prompt_text = prompt_text.strip()
-        else:
-            # 参考文字为空时，尝试自动转写；转写也失败则用默认文字
-            try:
-                full_prompt_text = transcribe_audio(prompt_audio)
-                if not full_prompt_text.strip():
-                    full_prompt_text = "你好，这是一段语音示例。"
-            except Exception:
-                full_prompt_text = "你好，这是一段语音示例。"
-
-        # 参考文本保留完整（不截断，避免破坏特征提取）——zero_shot 音色特征只来自参考音频
-        # 检测/重试时用于判断"是否复述了参考文本"
+        # 参考文本：请求可覆盖音色登记文本；保留完整（不截断，避免破坏特征提取）——
+        # zero_shot 音色特征只来自参考音频；检测/重试时用于判断"是否复述了参考文本"
+        # （旧版此处有一段"文本为空时 ASR 现场转写"的兜底，随后被无条件覆盖，属死代码，2026-09-06 清理）
         full_prompt_text = (request.prompt_text or custom_voice.get("text", "") or "").strip()
 
         # === 参考文本格式化（根治复述：官方 <|endofprompt|> 分隔符） ===
@@ -724,11 +697,10 @@ def openai_speech(request: SpeechRequest):
 
         # === 高危文本检测（备用路由，一般不再需要） ===
         # endofprompt 已根治复述，auto 模式全部走 zero_shot。此判定保留用于极端兜底。
-        import re as _re
         input_stripped = request.input.strip()
         high_risk = (
             len(input_stripped) <= 20
-            and _re.match(r'^(好的|好|嗯|恩|哦|啊|行|对|是的|呃|嗯嗯|好的吧|哈哈哈|哈哈|哎|诶|早上好|早安|嗨|喂|hello|hi)', input_stripped, _re.IGNORECASE) is not None
+            and re.match(r'^(好的|好|嗯|恩|哦|啊|行|对|是的|呃|嗯嗯|好的吧|哈哈哈|哈哈|哎|诶|早上好|早安|嗨|喂|hello|hi)', input_stripped, re.IGNORECASE) is not None
         )
         if high_risk:
             print(f"[TTS-ROUTE] high-risk input {input_stripped!r} (备用路由)", flush=True)

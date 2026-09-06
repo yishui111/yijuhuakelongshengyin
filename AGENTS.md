@@ -49,7 +49,7 @@
 ## 5. 已知问题 / TODO / 安全注意
 
 - 引擎 `frontend._extract_speech_token` 对参考音频有 30 秒硬限制（超限 assert 崩溃）；app.py 已在各参考音频入口（建音色 / tts / tts_async / batch / openai_speech / batch 后台）用 `check_prompt_duration()` 拦截并返回 400，新增合成入口时记得带上该校验（2026-09-05 修复「超长参考音频导致流式响应 ERR_INCOMPLETE_CHUNKED_ENCODING」）
-- **Fun-ASR 加载会把 torch 全局默认 dtype 翻成 bfloat16**（funasr 构建 bf16 LLM 时触发），此后未显式指定 dtype 的张量工厂调用全部被污染：页面「上传参考音频」走现场提取（whisper mel / kaldi.fbank 在 CPU 上重算），精度受损后合成直接退化为乱码循环（token ±1、说话人 embedding 漂移）；已预热音色的缓存命中路径（OpenAI 接口）不受影响。修复（2026-09-06）：Fun-ASR 改为 lifespan 内同步加载（开始对外服务前完成，启动时长相应变为 2-5 分钟），并在 get_asr_model 加载完成后 `torch.set_default_dtype(torch.float32)` 恢复全局默认。勿改回后台预热线程。
+- **Fun-ASR 加载会把 torch 全局默认 dtype 翻成 bfloat16**（funasr 构建 bf16 LLM 时触发）。影响范围（2026-09-06 实测澄清）：仅让未显式指定 dtype 的张量工厂调用变成 bf16，**并不导致合成乱码**（单独模拟 bf16 合成正常）；作者在 frontend._extract_spk_embedding 加显式 float32 补丁是为避免与 flow 权重 dtype 不匹配的报错。当前处理：Fun-ASR 在 lifespan 内同步加载（对外服务前完成，启动时长 2-5 分钟）+ 加载后恢复全局 float32，使 /health healthy 即全功能就绪。**排查合成乱码时先查输入文本编码**：用 curl/Git Bash 直接 -F 传中文会把编码搅乱（引擎忠实合成乱码文本，ASR 回听也是乱码，极具迷惑性）；浏览器页面或 python UTF-8 请求正常。2026-09-06 一度误判为 dtype 污染，实为测试工具编码问题。
 - 引擎源码由部署脚本从 GitHub 拉取「当前 master」，若上游接口变动可能需同步适配 app.py（本机验过的引擎版本为镜像内快照 + 少量本地补丁）
 - `mcp_server.py` 默认指向 CosyVoice2-0.5B（与主服务 v3 不同），用前需自行准备对应权重目录
 - 声音克隆需遵守本人/授权声音使用规范

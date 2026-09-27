@@ -138,3 +138,4 @@ code/asset/
 
 # ===== 本项目专用：首次安装标记 =====
 venv/.deps_installed
+测试结果/
